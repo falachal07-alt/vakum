@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Power Clean 3D - Ultimate Laser</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: 'Segoe UI', sans-serif; touch-action: none; background: #000; }
+        canvas { display: block; position: fixed; top: 0; left: 0; z-index: 1; }
+        #ui {
+            position: relative;
+            z-index: 10;
+            width: 100%;
+            height: 100vh;
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            padding: 20px;
+        }
+        .glass {
+            background: rgba(0, 0, 0, 0.8);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(34, 211, 238, 0.3);
+            border-radius: 15px;
+            padding: 12px;
+            pointer-events: auto;
+        }
+        #progress-bar {
+            height: 8px;
+            width: 0%;
+            background: #22d3ee;
+            border-radius: 4px;
+            box-shadow: 0 0 10px #22d3ee;
+            transition: width 0.2s;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="ui">
+        <div class="flex flex-col items-center gap-2">
+            <div class="glass text-center min-w-[200px]">
+                <div class="text-[10px] text-cyan-400 font-bold mb-1 uppercase tracking-widest">Level <span id="lvl-val">1</span></div>
+                <div class="w-full bg-slate-900 h-2 rounded-full overflow-hidden">
+                    <div id="progress-bar"></div>
+                </div>
+                <div class="flex justify-between mt-1 text-[9px] text-white/50 font-bold uppercase">
+                    <span id="pct-val">0%</span>
+                    <span>Bersih</span>
+                </div>
+            </div>
+            <div class="flex gap-2">
+                <div class="glass py-1 px-4 text-white text-[10px]">⏱️ <span id="time-val">60</span>s</div>
+                <div class="glass py-1 px-4 text-yellow-400 text-[10px] font-bold">⭐ <span id="score-val">0</span></div>
+            </div>
+        </div>
+
+        <div id="status-msg" class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-cyan-400 font-black text-4xl hidden pointer-events-none italic tracking-tighter">
+            LEVEL CLEAR!
+        </div>
+    </div>
+
+    <div id="start-screen" class="fixed inset-0 z-[100] flex items-center justify-center bg-black">
+        <div class="text-center p-10 bg-slate-900/50 border border-cyan-500/20 rounded-3xl">
+            <h1 class="text-4xl font-black text-white mb-2 italic">LASER CLEAN</h1>
+            <p class="text-cyan-500/50 mb-8 text-[10px] uppercase tracking-widest">Tekan layar untuk mulai</p>
+            <button onclick="handleGameStart()" class="px-10 py-4 bg-cyan-500 text-black font-black rounded-xl shadow-lg">
+                MULAI OPERASI
+            </button>
+        </div>
+    </div>
+
+    <div id="fail-screen" class="fixed inset-0 z-[100] flex items-center justify-center bg-red-950/90 hidden">
+        <div class="text-center p-10 bg-black border border-red-500/30 rounded-3xl">
+            <h2 class="text-2xl font-black text-white mb-6 uppercase">Misi Gagal!</h2>
+            <button onclick="handleRestart()" class="px-10 py-3 bg-white text-black font-bold rounded-lg transition-all">
+                COBA LAGI
+            </button>
+        </div>
+    </div>
+
+    <script>
+        let audioCtx, laserOsc, laserGain;
+
+        function initAudio() {
+            if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+        }
+
+        function playLaserSound(active) {
+            if (!audioCtx) return;
+            if (active) {
+                if (laserOsc) return;
+                laserOsc = audioCtx.createOscillator();
+                laserGain = audioCtx.createGain();
+                laserOsc.type = 'square';
+                laserOsc.frequency.setValueAtTime(120, audioCtx.currentTime);
+                laserGain.gain.setValueAtTime(0, audioCtx.currentTime);
+                laserGain.gain.linearRampToValueAtTime(0.03, audioCtx.currentTime + 0.1);
+                laserOsc.connect(laserGain).connect(audioCtx.destination);
+                laserOsc.start();
+            } else {
+                if (laserGain) {
+                    laserGain.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.1);
+                    setTimeout(() => { if (laserOsc) { laserOsc.stop(); laserOsc = null; } laserGain = null; }, 150);
+                }
+            }
+        }
+
+        let scene, camera, renderer, clock;
+        let mainObj, dirtGroup, bombs = [];
+        let cannon, laserBeam;
+        let level = 1, score = 0, timeRemaining = 60;
+        let isRunning = false, isFiring = false;
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+
+        function init() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x00050a);
+            
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 100);
+            camera.position.set(0, 1.8, 5.5);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            document.body.appendChild(renderer.domElement);
+
+            scene.add(new THREE.AmbientLight(0xffffff, 0.4));
+            const sun = new THREE.DirectionalLight(0xffffff, 0.8);
+            sun.position.set(5, 5, 5);
+            scene.add(sun);
+
+            cannon = new THREE.Group();
+            const barrel = new THREE.Mesh(
+                new THREE.CylinderGeometry(0.08, 0.1, 0.6, 12),
+                new THREE.MeshStandardMaterial({ color: 0x1e293b })
+            );
+            barrel.rotation.x = Math.PI / 2;
+            cannon.add(barrel);
+            cannon.position.set(0, -0.4, 4);
+            scene.add(cannon);
+
+            const lGeo = new THREE.CylinderGeometry(0.03, 0.03, 1, 8);
+            lGeo.rotateX(Math.PI / 2);
+            lGeo.translate(0, 0, 0.5);
+            laserBeam = new THREE.Mesh(lGeo, new THREE.MeshBasicMaterial({ color: 0x00ffff }));
+            laserBeam.visible = false;
+            scene.add(laserBeam);
+
+            loadLevel(level);
+            setupInput();
+            animate();
+        }
+
+        function loadLevel(n) {
+            if(mainObj) scene.remove(mainObj);
+            if(dirtGroup) scene.remove(dirtGroup);
+            bombs.forEach(b => scene.remove(b));
+            bombs = [];
+
+            const geos = [
+                new THREE.TorusKnotGeometry(0.7, 0.25, 100, 16),
+                new THREE.IcosahedronGeometry(1.2, 1),
+                new THREE.BoxGeometry(1.4, 1.4, 1.4),
+                new THREE.TorusGeometry(0.9, 0.3, 16, 100)
+            ];
+            mainObj = new THREE.Mesh(geos[(n-1)%geos.length], new THREE.MeshStandardMaterial({ color: 0xffffff }));
+            mainObj.position.y = 1.2;
+            scene.add(mainObj);
+
+            dirtGroup = new THREE.Group();
+            dirtGroup.position.copy(mainObj.position);
+            const dGeo = new THREE.SphereGeometry(0.07, 6, 6);
+            const dMat = new THREE.MeshBasicMaterial({ color: 0x331100 });
+            
+            for(let i=0; i<80 + (n*10); i++) {
+                const d = new THREE.Mesh(dGeo, dMat);
+                const phi = Math.random() * Math.PI * 2;
+                const theta = Math.random() * Math.PI;
+                const r = 1.05; 
+                d.position.set(r * Math.sin(theta) * Math.cos(phi), r * Math.sin(theta) * Math.sin(phi), r * Math.cos(theta));
+                d.isClean = false;
+                dirtGroup.add(d);
+            }
+            scene.add(dirtGroup);
+
+            if(n > 1) {
+                for(let i=0; i<Math.min(5, n); i++) {
+                    const b = new THREE.Mesh(new THREE.SphereGeometry(0.15, 8, 8), new THREE.MeshBasicMaterial({ color: 0xff0000 }));
+                    b.orbitRad = 1.8 + Math.random();
+                    b.angle = Math.random() * Math.PI * 2;
+                    b.speed = 0.01 + (n * 0.002);
+                    bombs.push(b);
+                    scene.add(b);
+                }
+            }
+            timeRemaining = 60;
+            updateUI();
+        }
+
+        function setupInput() {
+            const startF = (e) => { 
+                initAudio(); 
+                if(!isRunning) return; 
+                isFiring = true; 
+                playLaserSound(true); 
+                updateM(e); 
+            };
+            const stopF = () => { isFiring = false; laserBeam.visible = false; playLaserSound(false); };
+            const updateM = (e) => {
+                const x = e.touches ? e.touches[0].clientX : e.clientX;
+                const y = e.touches ? e.touches[0].clientY : e.clientY;
+                mouse.x = (x / window.innerWidth) * 2 - 1;
+                mouse.y = -(y / window.innerHeight) * 2 + 1;
+            };
+            window.addEventListener('mousedown', startF);
+            window.addEventListener('touchstart', startF, { passive: false });
+            window.addEventListener('mouseup', stopF);
+            window.addEventListener('touchend', stopF);
+            window.addEventListener('mousemove', updateM);
+            window.addEventListener('touchmove', updateM, { passive: false });
+        }
+
+        function handleFiring() {
+            raycaster.setFromCamera(mouse, camera);
+            const bHits = raycaster.intersectObjects(bombs);
+            if(bHits.length > 0) return gameOver();
+
+            const dHits = raycaster.intersectObjects(dirtGroup.children);
+            const oHits = raycaster.intersectObject(mainObj);
+
+            if(dHits.length > 0 || oHits.length > 0) {
+                const hit = dHits.length > 0 ? dHits[0].point : oHits[0].point;
+                laserBeam.visible = true;
+                const startPos = new THREE.Vector3();
+                cannon.getWorldPosition(startPos);
+                laserBeam.position.copy(startPos);
+                laserBeam.lookAt(hit);
+                laserBeam.scale.z = startPos.distanceTo(hit);
+
+                dirtGroup.children.forEach(d => {
+                    if(!d.isClean) {
+                        const wp = new THREE.Vector3();
+                        d.getWorldPosition(wp);
+                        if(wp.distanceTo(hit) < 0.45) {
+                            d.isClean = true;
+                            d.visible = false;
+                            score += 10;
+                        }
+                    }
+                });
+                updateUI();
+            } else {
+                laserBeam.visible = false;
+            }
+        }
+
+        function updateUI() {
+            const cleaned = dirtGroup.children.filter(d => d.isClean).length;
+            const pct = Math.floor((cleaned / dirtGroup.children.length) * 100);
+            document.getElementById('lvl-val').innerText = level;
+            document.getElementById('pct-val').innerText = pct + '%';
+            document.getElementById('progress-bar').style.width = pct + '%';
+            document.getElementById('score-val').innerText = score;
+            document.getElementById('time-val').innerText = Math.ceil(timeRemaining);
+            if(pct >= 100) nextLvl();
+        }
+
+        function nextLvl() {
+            isRunning = false; isFiring = false;
+            document.getElementById('status-msg').classList.remove('hidden');
+            setTimeout(() => {
+                document.getElementById('status-msg').classList.add('hidden');
+                level++; loadLevel(level); isRunning = true;
+            }, 1000);
+        }
+
+        function gameOver() {
+            isRunning = false; isFiring = false; laserBeam.visible = false; playLaserSound(false);
+            document.getElementById('fail-screen').classList.remove('hidden');
+        }
+
+        function handleGameStart() {
+            document.getElementById('start-screen').classList.add('hidden');
+            clock = new THREE.Clock(); isRunning = true;
+        }
+
+        function handleRestart() {
+            document.getElementById('fail-screen').classList.add('hidden');
+            score = 0; loadLevel(level); isRunning = true; clock = new THREE.Clock();
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            if(isRunning) {
+                const delta = clock.getDelta();
+                timeRemaining -= delta;
+                if(timeRemaining <= 0) gameOver();
+                if(isFiring) handleFiring();
+
+                cannon.rotation.y = THREE.MathUtils.lerp(cannon.rotation.y, -mouse.x * 0.8, 0.1);
+                cannon.rotation.x = THREE.MathUtils.lerp(cannon.rotation.x, (mouse.y * 0.4) - 0.2, 0.1);
+
+                mainObj.rotation.y += 0.005;
+                dirtGroup.rotation.y += 0.005;
+
+                bombs.forEach(b => {
+                    b.angle += b.speed;
+                    b.position.x = Math.cos(b.angle) * b.orbitRad;
+                    b.position.z = Math.sin(b.angle) * b.orbitRad;
+                    b.position.y = 1.2 + Math.sin(b.angle * 2) * 0.5;
+                });
+            }
+            renderer.render(scene, camera);
+        }
+
+        init();
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
+
